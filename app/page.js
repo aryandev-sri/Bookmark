@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,6 +16,7 @@ import {
   Globe,
   Zap,
   Search,
+  X,
   LinkIcon
 } from 'lucide-react'
 
@@ -101,7 +102,43 @@ function LoginPage({ onSignIn, loading }) {
   )
 }
 
-function BookmarkCard({ bookmark, onDelete, deleting }) {
+// Split a search query into lowercase terms ("react docs" -> ["react", "docs"])
+function getSearchTerms(query) {
+  return query.toLowerCase().split(/\s+/).filter(Boolean)
+}
+
+function getHostname(url) {
+  try {
+    return new URL(url).hostname.replace('www.', '')
+  } catch {
+    return url
+  }
+}
+
+// A bookmark matches if EVERY term appears in its title, URL or hostname
+function matchesSearch(bookmark, terms) {
+  if (terms.length === 0) return true
+  const haystack = `${bookmark.title} ${bookmark.url} ${getHostname(bookmark.url)}`.toLowerCase()
+  return terms.every((t) => haystack.includes(t))
+}
+
+// Wraps matched terms in <mark> so users can see why a result matched
+function Highlight({ text, terms }) {
+  if (!terms || terms.length === 0) return text
+  const escaped = terms.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const regex = new RegExp(`(${escaped.join('|')})`, 'gi')
+  return text.split(regex).map((part, i) =>
+    i % 2 === 1 ? (
+      <mark key={i} className="bg-yellow-200 text-foreground rounded-sm px-0.5">
+        {part}
+      </mark>
+    ) : (
+      part
+    )
+  )
+}
+
+function BookmarkCard({ bookmark, onDelete, deleting, terms }) {
   const faviconUrl = (() => {
     try {
       const url = new URL(bookmark.url)
@@ -159,7 +196,7 @@ function BookmarkCard({ bookmark, onDelete, deleting }) {
 
           <div className="flex-1 min-w-0">
             <h3 className="font-medium text-sm truncate text-foreground">
-              {bookmark.title}
+              <Highlight text={bookmark.title} terms={terms} />
             </h3>
             <a
               href={bookmark.url}
@@ -167,7 +204,7 @@ function BookmarkCard({ bookmark, onDelete, deleting }) {
               rel="noopener noreferrer"
               className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1 mt-1 truncate"
             >
-              <span className="truncate">{displayUrl}</span>
+              <span className="truncate"><Highlight text={displayUrl} terms={terms} /></span>
               <ExternalLink className="w-3 h-3 flex-shrink-0" />
             </a>
             <span className="text-xs text-muted-foreground/60 mt-1 block">
@@ -198,6 +235,7 @@ function Dashboard({ user, bookmarks, onSignOut, onAddBookmark, onDeleteBookmark
   const [url, setUrl] = useState('')
   const [title, setTitle] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const searchRef = useRef(null)
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -218,14 +256,25 @@ function Dashboard({ user, bookmarks, onSignOut, onAddBookmark, onDeleteBookmark
     }
   }
 
-  const filteredBookmarks = bookmarks.filter((b) => {
-    if (!searchQuery.trim()) return true
-    const q = searchQuery.toLowerCase()
-    return (
-      b.title.toLowerCase().includes(q) ||
-      b.url.toLowerCase().includes(q)
-    )
-  })
+  const searchTerms = useMemo(() => getSearchTerms(searchQuery), [searchQuery])
+
+  const filteredBookmarks = useMemo(
+    () => bookmarks.filter((b) => matchesSearch(b, searchTerms)),
+    [bookmarks, searchTerms]
+  )
+
+  // Keyboard shortcut: press "/" to focus search
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const tag = e.target.tagName
+      if (e.key === '/' && tag !== 'INPUT' && tag !== 'TEXTAREA') {
+        e.preventDefault()
+        searchRef.current?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-blue-50/30 to-background">
@@ -309,16 +358,45 @@ function Dashboard({ user, bookmarks, onSignOut, onAddBookmark, onDeleteBookmark
         </Card>
 
         {/* Search */}
-        {bookmarks.length > 3 && (
-          <div className="relative mb-4">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              type="text"
-              placeholder="Search bookmarks..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 h-10"
-            />
+        {bookmarks.length > 0 && (
+          <div className="mb-4">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              <Input
+                ref={searchRef}
+                type="text"
+                placeholder="Search by title or URL...  (press / to focus)"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setSearchQuery('')
+                    e.target.blur()
+                  }
+                }}
+                className="pl-9 pr-9 h-10"
+                aria-label="Search bookmarks"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery('')
+                    searchRef.current?.focus()
+                  }}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  aria-label="Clear search"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+            {searchTerms.length > 0 && (
+              <p className="text-xs text-muted-foreground mt-2 px-1">
+                {filteredBookmarks.length} of {bookmarks.length} bookmark
+                {bookmarks.length !== 1 ? 's' : ''} match
+              </p>
+            )}
           </div>
         )}
 
@@ -336,7 +414,9 @@ function Dashboard({ user, bookmarks, onSignOut, onAddBookmark, onDeleteBookmark
             </div>
           ) : filteredBookmarks.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-sm text-muted-foreground">No bookmarks match your search</p>
+              <p className="text-sm text-muted-foreground">
+                No bookmarks match &quot;{searchQuery.trim()}&quot;
+              </p>
             </div>
           ) : (
             filteredBookmarks.map((bookmark) => (
@@ -345,6 +425,7 @@ function Dashboard({ user, bookmarks, onSignOut, onAddBookmark, onDeleteBookmark
                 bookmark={bookmark}
                 onDelete={onDeleteBookmark}
                 deleting={deletingId === bookmark.id}
+                terms={searchTerms}
               />
             ))
           )}
